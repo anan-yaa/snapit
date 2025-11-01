@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { handleOffer, initPeerConnection, sendFile } from "./lib/peer.js";
+import FileTransferToast from "./components/FileTransferToast.jsx";
+import FileTransferProgress from "./components/FileTransferProgress.jsx";
+import SendingQueue from "./components/SendingQueue.jsx";
 
 const DEFAULT_WS_URL = "ws://localhost:4000";
 
@@ -14,6 +17,10 @@ function App() {
   const [isSending, setIsSending] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [connectionStates, setConnectionStates] = useState({});
+  const [incomingFileRequest, setIncomingFileRequest] = useState(null);
+  const [receivingFileProgress, setReceivingFileProgress] = useState(null);
+  const [sendingQueue, setSendingQueue] = useState([]);
+  const [currentSendingFile, setCurrentSendingFile] = useState(null);
 
   const socketRef = useRef(null);
   const peersRef = useRef({});
@@ -46,6 +53,61 @@ function App() {
     URL.revokeObjectURL(url);
 
     setStatusMessage(`Received "${fileName}"`);
+    
+    // Clear progress after download
+    setTimeout(() => {
+      setReceivingFileProgress(null);
+    }, 1000);
+  }, []);
+
+  const handleIncomingFileRequest = useCallback((metadata, onAccept, onReject) => {
+    setIncomingFileRequest({
+      fileName: metadata.name,
+      fileSize: metadata.size,
+      totalChunks: metadata.totalChunks,
+      onAccept,
+      onReject,
+    });
+  }, []);
+
+  const handleAcceptFile = useCallback(() => {
+    if (incomingFileRequest?.onAccept) {
+      incomingFileRequest.onAccept();
+      setStatusMessage(`Accepting file "${incomingFileRequest.fileName}"...`);
+      
+      // Initialize progress tracking
+      setReceivingFileProgress({
+        fileName: incomingFileRequest.fileName,
+        progress: 0,
+        receivedBytes: 0,
+        totalBytes: incomingFileRequest.fileSize,
+        receivedChunks: 0,
+        totalChunks: incomingFileRequest.totalChunks,
+      });
+    }
+    setIncomingFileRequest(null);
+  }, [incomingFileRequest]);
+
+  const handleRejectFile = useCallback(() => {
+    if (incomingFileRequest?.onReject) {
+      incomingFileRequest.onReject();
+      setStatusMessage(`Rejected file "${incomingFileRequest.fileName}"`);
+    }
+    setIncomingFileRequest(null);
+  }, [incomingFileRequest]);
+
+  const handleReceiveProgress = useCallback((progressData) => {
+    if (progressData.direction === "inbound") {
+      const progress = (progressData.receivedBytes / progressData.totalBytes) * 100;
+      setReceivingFileProgress({
+        fileName: progressData.metadata.name,
+        progress,
+        receivedBytes: progressData.receivedBytes,
+        totalBytes: progressData.totalBytes,
+        receivedChunks: progressData.receivedChunks,
+        totalChunks: progressData.totalChunks,
+      });
+    }
   }, []);
 
   const registerPeer = useCallback(
@@ -91,6 +153,8 @@ function App() {
               offer: message.offer,
               registerPeer,
               onFileReceived: triggerFileDownload,
+              onFileRequest: handleIncomingFileRequest,
+              onProgress: handleReceiveProgress,
             });
             break;
           }
@@ -116,7 +180,7 @@ function App() {
         console.error("Failed to process signaling message", error);
       }
     },
-    [registerPeer, triggerFileDownload]
+    [registerPeer, triggerFileDownload, handleIncomingFileRequest, handleReceiveProgress]
   );
 
   useEffect(() => {
@@ -181,13 +245,15 @@ function App() {
         targetId: peer.id,
         registerPeer,
         onFileReceived: triggerFileDownload,
+        onFileRequest: handleIncomingFileRequest,
+        onProgress: handleReceiveProgress,
       }).catch((error) => {
         console.error("Failed to start peer connection", error);
         setStatusMessage(`Unable to connect to ${peer.name}`);
         updateConnectionState(peer.id, "failed");
       });
     },
-    [registerPeer, triggerFileDownload, updateConnectionState]
+    [registerPeer, triggerFileDownload, handleIncomingFileRequest, handleReceiveProgress, updateConnectionState]
   );
 
   const handleSendButtonClick = useCallback(() => {
@@ -201,16 +267,48 @@ function App() {
 
   const handleFileInputChange = useCallback(
     async (event) => {
-      const file = event.target.files?.[0];
-      if (!file || !selectedPeer) return;
+      const files = Array.from(event.target.files || []);
+      if (files.length === 0 || !selectedPeer) return;
 
+      // Add files to queue
+      const fileQueue = files.map((file, index) => ({
+        id: `${Date.now()}-${index}`,
+        file,
+        targetId: selectedPeer.id,
+        targetName: selectedPeer.name,
+        status: 'pending',
+        progress: 0,
+      }));
+
+      setSendingQueue(prev => [...prev, ...fileQueue]);
+      setStatusMessage(`Added ${files.length} file(s) to queue`);
+      event.target.value = "";
+    },
+    [selectedPeer]
+  );
+
+  // Process sending queue
+  useEffect(() => {
+    if (isSending || sendingQueue.length === 0) return;
+
+    const nextFile = sendingQueue.find(f => f.status === 'pending');
+    if (!nextFile) return;
+
+    const sendNextFile = async () => {
       setIsSending(true);
-      setStatusMessage(`Sending "${file.name}" to ${selectedPeer.name}...`);
+      setCurrentSendingFile(nextFile);
+      
+      // Update status to sending
+      setSendingQueue(prev => 
+        prev.map(f => f.id === nextFile.id ? { ...f, status: 'sending' } : f)
+      );
+
+      setStatusMessage(`Sending "${nextFile.file.name}" to ${nextFile.targetName}...`);
 
       try {
         await sendFile({
-          file,
-          targetId: selectedPeer.id,
+          file: nextFile.file,
+          targetId: nextFile.targetId,
           peers: peersRef.current,
           onProgress: ({ sentBytes, totalBytes }) => {
             const percent = totalBytes
@@ -218,22 +316,50 @@ function App() {
               : 100;
 
             setStatusMessage(
-              `Sending "${file.name}" to ${selectedPeer.name} (${percent}%)`
+              `Sending "${nextFile.file.name}" to ${nextFile.targetName} (${percent}%)`
+            );
+
+            // Update progress in queue
+            setSendingQueue(prev =>
+              prev.map(f => f.id === nextFile.id ? { ...f, progress: percent } : f)
             );
           },
         });
 
-        setStatusMessage(`Sent "${file.name}" to ${selectedPeer.name}`);
+        // Mark as completed
+        setSendingQueue(prev =>
+          prev.map(f => f.id === nextFile.id ? { ...f, status: 'completed', progress: 100 } : f)
+        );
+
+        setStatusMessage(`Sent "${nextFile.file.name}" to ${nextFile.targetName}`);
+        
+        // Remove completed file after a delay
+        setTimeout(() => {
+          setSendingQueue(prev => prev.filter(f => f.id !== nextFile.id));
+        }, 2000);
+
       } catch (error) {
         console.error("Failed to send file", error);
-        setStatusMessage(error.message || "Failed to send file");
+        
+        // Mark as failed
+        setSendingQueue(prev =>
+          prev.map(f => f.id === nextFile.id ? { ...f, status: 'failed' } : f)
+        );
+
+        setStatusMessage(`Failed to send "${nextFile.file.name}": ${error.message}`);
+        
+        // Remove failed file after delay
+        setTimeout(() => {
+          setSendingQueue(prev => prev.filter(f => f.id !== nextFile.id));
+        }, 3000);
       } finally {
         setIsSending(false);
-        event.target.value = "";
+        setCurrentSendingFile(null);
       }
-    },
-    [selectedPeer]
-  );
+    };
+
+    sendNextFile();
+  }, [sendingQueue, isSending]);
 
   const appClassName = useMemo(() => {
     if (isLoadingPeers && availablePeers.length === 0) {
@@ -245,6 +371,29 @@ function App() {
 
   return (
     <>
+      {incomingFileRequest && (
+        <FileTransferToast
+          fileName={incomingFileRequest.fileName}
+          fileSize={incomingFileRequest.fileSize}
+          totalChunks={incomingFileRequest.totalChunks}
+          onAccept={handleAcceptFile}
+          onReject={handleRejectFile}
+        />
+      )}
+
+      {receivingFileProgress && (
+        <FileTransferProgress
+          fileName={receivingFileProgress.fileName}
+          progress={receivingFileProgress.progress}
+          receivedBytes={receivingFileProgress.receivedBytes}
+          totalBytes={receivingFileProgress.totalBytes}
+          receivedChunks={receivingFileProgress.receivedChunks}
+          totalChunks={receivingFileProgress.totalChunks}
+        />
+      )}
+
+      <SendingQueue queue={sendingQueue} />
+
       <header>
         <i
           className="bi bi-file-earmark-arrow-up-fill"
@@ -325,6 +474,7 @@ function App() {
           ref={fileInputRef}
           type="file"
           id="fileInput"
+          multiple
           style={{ display: "none" }}
           onChange={handleFileInputChange}
         />
@@ -333,13 +483,13 @@ function App() {
           id="sendFileBtn"
           type="button"
           onClick={handleSendButtonClick}
-          disabled={!selectedPeer || isSending}
+          disabled={!selectedPeer}
         >
-          {isSending
-            ? "Sending..."
-            : selectedPeer
-            ? `Send to ${selectedPeer.name}`
-            : "Select File"}
+          {selectedPeer
+            ? sendingQueue.length > 0
+              ? `Send More to ${selectedPeer.name}`
+              : `Send Files to ${selectedPeer.name}`
+            : "Select Files"}
         </button>
 
         {statusMessage && (

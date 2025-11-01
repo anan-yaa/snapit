@@ -223,7 +223,7 @@ function handleIncomingChunk(channel, buffer, onFileReceived, onProgress) {
   }
 }
 
-function handleControlMessage(text, channel, onFileReceived, onProgress) {
+function handleControlMessage(text, channel, onFileReceived, onProgress, onFileRequest) {
   let message;
   try {
     message = JSON.parse(text);
@@ -243,7 +243,7 @@ function handleControlMessage(text, channel, onFileReceived, onProgress) {
       console.log(`Transfer ${message.transferId} complete`);
       break;
     case "file-metadata":
-      prepareIncomingTransfer(message.metadata, channel, onFileReceived, onProgress);
+      prepareIncomingTransfer(message.metadata, channel, onFileReceived, onProgress, onFileRequest);
       break;
     case "transfer-rejected":
       console.warn(`File transfer rejected: ${message.reason}`);
@@ -257,81 +257,99 @@ function handleControlMessage(text, channel, onFileReceived, onProgress) {
   }
 }
 
-async function prepareIncomingTransfer(metadata, channel, onFileReceived, onProgress) {
-  // Show confirmation dialog
-  const fileName = metadata.name || "Unknown file";
-  const fileSize = (metadata.size / 1024).toFixed(2);
-  const fileSizeUnit = metadata.size < 1024 * 1024 ? "KB" : "MB";
-  const displaySize = metadata.size < 1024 * 1024 
-    ? fileSize 
-    : (metadata.size / (1024 * 1024)).toFixed(2);
+async function prepareIncomingTransfer(metadata, channel, onFileReceived, onProgress, onFileRequest) {
+  // Create a promise that will be resolved when user accepts/rejects
+  return new Promise((resolve) => {
+    const handleAccept = () => {
+      // User accepted, prepare to receive
+      let transfer = incomingTransfers.get(metadata.id);
 
-  const userAccepted = confirm(
-    `Incoming file transfer:\n\n` +
-    `File: ${fileName}\n` +
-    `Size: ${displaySize} ${fileSizeUnit}\n` +
-    `Chunks: ${metadata.totalChunks}\n\n` +
-    `Do you want to accept this file?`
-  );
+      if (!transfer) {
+        transfer = {
+          metadata,
+          chunks: new Array(metadata.totalChunks).fill(null),
+          receivedChunks: 0,
+          receivedBytes: 0,
+          completed: false,
+          accepted: true,
+        };
+      } else {
+        transfer.metadata = { ...transfer.metadata, ...metadata };
+        transfer.chunks = new Array(metadata.totalChunks).fill(null);
+        transfer.receivedChunks = 0;
+        transfer.receivedBytes = 0;
+        transfer.completed = false;
+        transfer.accepted = true;
+      }
 
-  if (!userAccepted) {
-    // Send rejection message
-    if (channel && channel.readyState === "open") {
-      try {
-        channel.send(
-          JSON.stringify({
-            type: "transfer-rejected",
-            transferId: metadata.id,
-            reason: "User declined the file transfer",
-          })
-        );
-      } catch (error) {
-        console.error("Failed to send rejection message", error);
+      incomingTransfers.set(metadata.id, transfer);
+
+      // Send acceptance acknowledgment
+      if (channel && channel.readyState === "open") {
+        try {
+          channel.send(
+            JSON.stringify({
+              type: "transfer-accepted",
+              transferId: metadata.id,
+            })
+          );
+        } catch (error) {
+          console.error("Failed to send acceptance message", error);
+        }
+      }
+
+      resolve(true);
+    };
+
+    const handleReject = () => {
+      // Send rejection message
+      if (channel && channel.readyState === "open") {
+        try {
+          channel.send(
+            JSON.stringify({
+              type: "transfer-rejected",
+              transferId: metadata.id,
+              reason: "User declined the file transfer",
+            })
+          );
+        } catch (error) {
+          console.error("Failed to send rejection message", error);
+        }
+      }
+      console.log(`File transfer rejected: ${metadata.name}`);
+      resolve(false);
+    };
+
+    // Call the onFileRequest callback with metadata and accept/reject handlers
+    if (onFileRequest) {
+      onFileRequest(metadata, handleAccept, handleReject);
+    } else {
+      // Fallback to browser confirm if no callback provided
+      const fileName = metadata.name || "Unknown file";
+      const fileSize = (metadata.size / 1024).toFixed(2);
+      const fileSizeUnit = metadata.size < 1024 * 1024 ? "KB" : "MB";
+      const displaySize = metadata.size < 1024 * 1024 
+        ? fileSize 
+        : (metadata.size / (1024 * 1024)).toFixed(2);
+
+      const userAccepted = confirm(
+        `Incoming file transfer:\n\n` +
+        `File: ${fileName}\n` +
+        `Size: ${displaySize} ${fileSizeUnit}\n` +
+        `Chunks: ${metadata.totalChunks}\n\n` +
+        `Do you want to accept this file?`
+      );
+
+      if (userAccepted) {
+        handleAccept();
+      } else {
+        handleReject();
       }
     }
-    console.log(`File transfer rejected: ${fileName}`);
-    return;
-  }
-
-  // User accepted, prepare to receive
-  let transfer = incomingTransfers.get(metadata.id);
-
-  if (!transfer) {
-    transfer = {
-      metadata,
-      chunks: new Array(metadata.totalChunks).fill(null),
-      receivedChunks: 0,
-      receivedBytes: 0,
-      completed: false,
-      accepted: true,
-    };
-  } else {
-    transfer.metadata = { ...transfer.metadata, ...metadata };
-    transfer.chunks = new Array(metadata.totalChunks).fill(null);
-    transfer.receivedChunks = 0;
-    transfer.receivedBytes = 0;
-    transfer.completed = false;
-    transfer.accepted = true;
-  }
-
-  incomingTransfers.set(metadata.id, transfer);
-
-  // Send acceptance acknowledgment
-  if (channel && channel.readyState === "open") {
-    try {
-      channel.send(
-        JSON.stringify({
-          type: "transfer-accepted",
-          transferId: metadata.id,
-        })
-      );
-    } catch (error) {
-      console.error("Failed to send acceptance message", error);
-    }
-  }
+  });
 }
 
-const createReceiveHandler = (onFileReceived, onProgress) => (event) => {
+const createReceiveHandler = (onFileReceived, onProgress, onFileRequest) => (event) => {
   const processBuffer = (buffer) => {
     try {
       handleIncomingChunk(event.target, buffer, onFileReceived, onProgress);
@@ -351,7 +369,7 @@ const createReceiveHandler = (onFileReceived, onProgress) => (event) => {
   };
 
   if (typeof event.data === "string") {
-    handleControlMessage(event.data, event.target, onFileReceived, onProgress);
+    handleControlMessage(event.data, event.target, onFileReceived, onProgress, onFileRequest);
   } else if (event.data instanceof ArrayBuffer) {
     processBuffer(event.data);
   } else if (event.data instanceof Blob) {
@@ -378,13 +396,14 @@ export const initPeerConnection = async ({
   registerPeer,
   onFileReceived,
   onProgress,
+  onFileRequest,
 }) => {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     throw new Error("Signaling server is not connected");
   }
 
   const peer = new RTCPeerConnection(rtcConfig);
-  const receiveHandler = createReceiveHandler(onFileReceived, onProgress);
+  const receiveHandler = createReceiveHandler(onFileReceived, onProgress, onFileRequest);
 
   const channel = peer.createDataChannel("file");
   configureDataChannel(channel, receiveHandler);
@@ -450,13 +469,14 @@ export const handleOffer = ({
   registerPeer,
   onFileReceived,
   onProgress,
+  onFileRequest,
 }) => {
   if (!socket) {
     throw new Error("Signaling server is not connected");
   }
 
   const peer = new RTCPeerConnection(rtcConfig);
-  const receiveHandler = createReceiveHandler(onFileReceived, onProgress);
+  const receiveHandler = createReceiveHandler(onFileReceived, onProgress, onFileRequest);
   let dataChannel = null;
   const channelDeferred = new Promise((resolve) => {
     peer.ondatachannel = (event) => {
