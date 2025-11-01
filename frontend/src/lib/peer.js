@@ -183,6 +183,12 @@ function handleIncomingChunk(channel, buffer, onFileReceived, onProgress) {
     return;
   }
 
+  // Check if transfer was accepted
+  if (!transfer.accepted) {
+    console.warn(`Ignoring chunk for rejected transfer ${transferId}`);
+    return;
+  }
+
   if (transfer.completed) {
     sendAck(channel, transferId, chunkIndex, transfer);
     return;
@@ -217,7 +223,7 @@ function handleIncomingChunk(channel, buffer, onFileReceived, onProgress) {
   }
 }
 
-function handleControlMessage(text, onFileReceived, onProgress) {
+function handleControlMessage(text, channel, onFileReceived, onProgress) {
   let message;
   try {
     message = JSON.parse(text);
@@ -237,7 +243,14 @@ function handleControlMessage(text, onFileReceived, onProgress) {
       console.log(`Transfer ${message.transferId} complete`);
       break;
     case "file-metadata":
-      prepareIncomingTransfer(message.metadata);
+      prepareIncomingTransfer(message.metadata, channel, onFileReceived, onProgress);
+      break;
+    case "transfer-rejected":
+      console.warn(`File transfer rejected: ${message.reason}`);
+      alert(`File transfer was rejected by the recipient.`);
+      break;
+    case "transfer-accepted":
+      console.log(`File transfer accepted for ${message.transferId}`);
       break;
     default:
       console.debug("Unhandled control message", message);
@@ -338,7 +351,7 @@ const createReceiveHandler = (onFileReceived, onProgress) => (event) => {
   };
 
   if (typeof event.data === "string") {
-    handleControlMessage(event.data, onFileReceived, onProgress);
+    handleControlMessage(event.data, event.target, onFileReceived, onProgress);
   } else if (event.data instanceof ArrayBuffer) {
     processBuffer(event.data);
   } else if (event.data instanceof Blob) {
