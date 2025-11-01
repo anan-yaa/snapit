@@ -1,4 +1,9 @@
-import { initPeerConnection, sendFile, handleOffer } from "./peer.js";
+import {
+  initPeerConnection,
+  sendFile,
+  handleOffer,
+  prepareIncomingTransfer,
+} from "./peer.js";
 
 const socket = new WebSocket("ws://localhost:4000");
 let myId = "";
@@ -35,13 +40,13 @@ function renderUserList(users) {
     li.onclick = () => {
       selectedPeerId = user.id;
       sendFileBtn.disabled = false;
-      
+
       // Check if peer connection already exists
       if (peers[user.id]) {
         alert(`Already connected to ${user.name}`);
         return;
       }
-      
+
       alert(`Connecting to ${user.name}...`);
       initPeerConnection(socket, user.id);
     };
@@ -90,30 +95,37 @@ socket.onmessage = async ({ data }) => {
     } else {
       console.warn(`No peer found for ${msg.from} or no handleSignal method`);
     }
+  } else if (msg.type === "file-metadata") {
+    console.log("Preparing incoming transfer", msg.metadata);
+    prepareIncomingTransfer(msg.metadata, msg.from);
   }
 };
 
 export function registerPeer(id, peerObj) {
   console.log("Registering peer:", id);
   peers[id] = peerObj;
-  
+
   // Add connection state logging
   if (peerObj.peer) {
     peerObj.peer.onconnectionstatechange = () => {
-      console.log(`Peer ${id} connection state: ${peerObj.peer.connectionState}`);
-      
-      if (peerObj.peer.connectionState === 'connected') {
+      console.log(
+        `Peer ${id} connection state: ${peerObj.peer.connectionState}`
+      );
+
+      if (peerObj.peer.connectionState === "connected") {
         console.log(`Successfully connected to peer ${id}`);
-      } else if (peerObj.peer.connectionState === 'failed') {
+      } else if (peerObj.peer.connectionState === "failed") {
         console.error(`Connection to peer ${id} failed`);
         delete peers[id]; // Clean up failed connection
       }
     };
-    
+
     peerObj.peer.onicegatheringstatechange = () => {
-      console.log(`Peer ${id} ICE gathering state: ${peerObj.peer.iceGatheringState}`);
+      console.log(
+        `Peer ${id} ICE gathering state: ${peerObj.peer.iceGatheringState}`
+      );
     };
-    
+
     peerObj.peer.onsignalingstatechange = () => {
       console.log(`Peer ${id} signaling state: ${peerObj.peer.signalingState}`);
     };
