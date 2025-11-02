@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { handleOffer, initPeerConnection, sendFile } from "./lib/peer.js";
-import FileTransferToast from "./components/FileTransferToast.jsx";
-import FileTransferProgress from "./components/FileTransferProgress.jsx";
+import { handleOffer, initPeerConnection, sendFile, sendBatchMetadata, sendFileChunksOnly } from "./lib/peer.js";
+import IncomingFilesDialog from "./components/IncomingFilesDialog.jsx";
+import ReceivingProgress from "./components/ReceivingProgress.jsx";
 import SendingQueue from "./components/SendingQueue.jsx";
 
 const DEFAULT_WS_URL = "ws://localhost:4000";
@@ -17,10 +17,15 @@ function App() {
   const [isSending, setIsSending] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [connectionStates, setConnectionStates] = useState({});
-  const [incomingFileRequest, setIncomingFileRequest] = useState(null);
-  const [receivingFileProgress, setReceivingFileProgress] = useState(null);
+  const [pendingIncomingFiles, setPendingIncomingFiles] = useState([]);
+  const [activeReceivingTransfers, setActiveReceivingTransfers] = useState([]);
   const [sendingQueue, setSendingQueue] = useState([]);
   const [currentSendingFile, setCurrentSendingFile] = useState(null);
+  
+  const pendingFileRequestsRef = useRef(new Map()); // fileId -> { metadata, onAccept, onReject }
+  const incomingBatchBufferRef = useRef([]); // temp buffer to batch incoming file metadata
+  const batchTimerRef = useRef(null); // debounce timer for batching
+  const hasShownDialogRef = useRef(false); // track if we've shown dialog for current batch
 
   const socketRef = useRef(null);
   const peersRef = useRef({});
@@ -32,6 +37,36 @@ function App() {
     [availablePeers, selectedPeerId]
   );
 
+  // Handle file rejection from receiver
+  useEffect(() => {
+    window.handleFileRejection = (transferId) => {
+      console.log(`File ${transferId} was rejected by receiver`);
+      
+      // Remove from sending queue or mark as rejected
+      setSendingQueue(prev => {
+        const updated = prev.map(f => {
+          if (f.id === transferId) {
+            return { ...f, status: 'rejected', progress: 0 };
+          }
+          return f;
+        });
+        
+        // Remove rejected file after a short delay
+        setTimeout(() => {
+          setSendingQueue(current => current.filter(f => f.id !== transferId));
+        }, 2000);
+        
+        return updated;
+      });
+      
+      setStatusMessage(`File was rejected by receiver`);
+    };
+
+    return () => {
+      delete window.handleFileRejection;
+    };
+  }, []);
+
   const updateConnectionState = useCallback((peerId, state) => {
     setConnectionStates((prev) => ({ ...prev, [peerId]: state }));
 
@@ -40,7 +75,7 @@ function App() {
     }
   }, []);
 
-  const triggerFileDownload = useCallback(({ name, blob }) => {
+  const triggerFileDownload = useCallback(({ name, blob, transferId }) => {
     const fileName = name || "received_file";
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -54,59 +89,142 @@ function App() {
 
     setStatusMessage(`Received "${fileName}"`);
     
-    // Clear progress after download
-    setTimeout(() => {
-      setReceivingFileProgress(null);
-    }, 1000);
+    // Remove from active transfers
+    if (transferId) {
+      setActiveReceivingTransfers(prev => prev.filter(t => t.id !== transferId));
+    }
   }, []);
 
   const handleIncomingFileRequest = useCallback((metadata, onAccept, onReject) => {
-    setIncomingFileRequest({
-      fileName: metadata.name,
-      fileSize: metadata.size,
+    console.log('handleIncomingFileRequest called with metadata:', metadata);
+    
+    const fileData = {
+      id: metadata.id,
+      name: metadata.name,
+      size: metadata.size,
       totalChunks: metadata.totalChunks,
-      onAccept,
-      onReject,
-    });
+    };
+
+    // Store callbacks for this file id
+    pendingFileRequestsRef.current.set(metadata.id, { metadata, onAccept, onReject });
+
+    // Push into batch buffer if not present
+    const existsInBuffer = incomingBatchBufferRef.current.some((f) => f.id === fileData.id);
+    if (!existsInBuffer) {
+      incomingBatchBufferRef.current.push(fileData);
+      console.log('Added file to buffer:', fileData.name, 'Buffer size:', incomingBatchBufferRef.current.length);
+    }
+
+    // Update state function
+    const updateState = () => {
+      // Create a copy of the buffer to work with
+      const bufferCopy = [...incomingBatchBufferRef.current];
+      console.log('Updating pendingIncomingFiles. Buffer:', bufferCopy.map(f => f.name));
+      
+      // Mark that we've started showing dialog BEFORE state update
+      if (bufferCopy.length > 0) {
+        hasShownDialogRef.current = true;
+      }
+      
+      setPendingIncomingFiles((prev) => {
+        // Merge existing pending list with buffer (unique by id)
+        const byId = new Map(prev.map((f) => [f.id, f]));
+        for (const f of bufferCopy) {
+          byId.set(f.id, f);
+        }
+        const newFiles = Array.from(byId.values());
+        console.log('New pendingIncomingFiles count:', newFiles.length, 'prev count:', prev.length, 'buffer count:', bufferCopy.length);
+        // Clear buffer only after we've used it
+        incomingBatchBufferRef.current = [];
+        return newFiles;
+      });
+      batchTimerRef.current = null;
+    };
+
+    // Always debounce, but use a shorter delay if dialog hasn't been shown yet
+    // This ensures all files arriving in quick succession are grouped together
+    if (batchTimerRef.current) {
+      clearTimeout(batchTimerRef.current);
+    }
+    
+    // Use shorter delay (100ms) if this is the first batch, longer (250ms) if dialog already showing
+    const delay = hasShownDialogRef.current ? 250 : 100;
+    console.log(`Scheduling state update in ${delay}ms. Buffer size:`, incomingBatchBufferRef.current.length, 'hasShownDialog:', hasShownDialogRef.current);
+    
+    batchTimerRef.current = setTimeout(() => {
+      // Double-check buffer still has items before updating
+      if (incomingBatchBufferRef.current.length > 0) {
+        updateState();
+      } else {
+        console.log('Timer fired but buffer is empty, skipping update');
+        batchTimerRef.current = null;
+      }
+    }, delay);
   }, []);
 
-  const handleAcceptFile = useCallback(() => {
-    if (incomingFileRequest?.onAccept) {
-      incomingFileRequest.onAccept();
-      setStatusMessage(`Accepting file "${incomingFileRequest.fileName}"...`);
-      
-      // Initialize progress tracking
-      setReceivingFileProgress({
-        fileName: incomingFileRequest.fileName,
-        progress: 0,
-        receivedBytes: 0,
-        totalBytes: incomingFileRequest.fileSize,
-        receivedChunks: 0,
-        totalChunks: incomingFileRequest.totalChunks,
-      });
+  const handleAcceptFiles = useCallback((selectedFiles) => {
+    selectedFiles.forEach(file => {
+      const request = pendingFileRequestsRef.current.get(file.id);
+      if (request) {
+        request.onAccept();
+        
+        // Add to active transfers
+        setActiveReceivingTransfers(prev => [...prev, {
+          id: file.id,
+          fileName: file.name,
+          totalBytes: file.size,
+          receivedBytes: 0,
+          totalChunks: file.totalChunks,
+          receivedChunks: 0,
+        }]);
+        
+        pendingFileRequestsRef.current.delete(file.id);
+      }
+    });
+    
+    // Clear dialog list and any in-flight buffer/timer
+    setPendingIncomingFiles([]);
+    incomingBatchBufferRef.current = [];
+    hasShownDialogRef.current = false;
+    if (batchTimerRef.current) {
+      clearTimeout(batchTimerRef.current);
+      batchTimerRef.current = null;
     }
-    setIncomingFileRequest(null);
-  }, [incomingFileRequest]);
+    setStatusMessage(`Accepting ${selectedFiles.length} file(s)...`);
+  }, []);
 
-  const handleRejectFile = useCallback(() => {
-    if (incomingFileRequest?.onReject) {
-      incomingFileRequest.onReject();
-      setStatusMessage(`Rejected file "${incomingFileRequest.fileName}"`);
+  const handleRejectFiles = useCallback((rejectedFiles) => {
+    // Reject the specified files
+    rejectedFiles.forEach(file => {
+      const request = pendingFileRequestsRef.current.get(file.id);
+      if (request) {
+        request.onReject();
+        pendingFileRequestsRef.current.delete(file.id);
+      }
+    });
+    
+    setPendingIncomingFiles([]);
+    hasShownDialogRef.current = false;
+    
+    if (rejectedFiles.length > 0) {
+      setStatusMessage(`Rejected ${rejectedFiles.length} file(s)`);
     }
-    setIncomingFileRequest(null);
-  }, [incomingFileRequest]);
+  }, []);
 
   const handleReceiveProgress = useCallback((progressData) => {
     if (progressData.direction === "inbound") {
-      const progress = (progressData.receivedBytes / progressData.totalBytes) * 100;
-      setReceivingFileProgress({
-        fileName: progressData.metadata.name,
-        progress,
-        receivedBytes: progressData.receivedBytes,
-        totalBytes: progressData.totalBytes,
-        receivedChunks: progressData.receivedChunks,
-        totalChunks: progressData.totalChunks,
-      });
+      setActiveReceivingTransfers(prev => 
+        prev.map(transfer => {
+          if (transfer.id === progressData.metadata.id) {
+            return {
+              ...transfer,
+              receivedBytes: progressData.receivedBytes,
+              receivedChunks: progressData.receivedChunks,
+            };
+          }
+          return transfer;
+        })
+      );
     }
   }, []);
 
@@ -270,18 +388,32 @@ function App() {
       const files = Array.from(event.target.files || []);
       if (files.length === 0 || !selectedPeer) return;
 
-      // Add files to queue
-      const fileQueue = files.map((file, index) => ({
-        id: `${Date.now()}-${index}`,
-        file,
-        targetId: selectedPeer.id,
-        targetName: selectedPeer.name,
-        status: 'pending',
-        progress: 0,
-      }));
+      try {
+        // Send batch metadata first so receiver sees all files at once
+        const filesMetadata = await sendBatchMetadata({
+          files,
+          targetId: selectedPeer.id,
+          peers: peersRef.current,
+        });
 
-      setSendingQueue(prev => [...prev, ...fileQueue]);
-      setStatusMessage(`Added ${files.length} file(s) to queue`);
+        // Add files to queue with their metadata
+        const fileQueue = files.map((file, index) => ({
+          id: filesMetadata[index].id,
+          file,
+          metadata: filesMetadata[index],
+          targetId: selectedPeer.id,
+          targetName: selectedPeer.name,
+          status: 'pending',
+          progress: 0,
+        }));
+
+        setSendingQueue(prev => [...prev, ...fileQueue]);
+        setStatusMessage(`Added ${files.length} file(s) to queue`);
+      } catch (error) {
+        console.error("Failed to send batch metadata", error);
+        setStatusMessage(`Failed to prepare files: ${error.message}`);
+      }
+      
       event.target.value = "";
     },
     [selectedPeer]
@@ -291,8 +423,19 @@ function App() {
   useEffect(() => {
     if (isSending || sendingQueue.length === 0) return;
 
+    // Skip rejected files and find next pending file
     const nextFile = sendingQueue.find(f => f.status === 'pending');
-    if (!nextFile) return;
+    if (!nextFile) {
+      // Check if there are any rejected files to clean up
+      const hasRejected = sendingQueue.some(f => f.status === 'rejected');
+      if (hasRejected) {
+        // Clean up rejected files
+        setTimeout(() => {
+          setSendingQueue(prev => prev.filter(f => f.status !== 'rejected'));
+        }, 100);
+      }
+      return;
+    }
 
     const sendNextFile = async () => {
       setIsSending(true);
@@ -306,8 +449,10 @@ function App() {
       setStatusMessage(`Sending "${nextFile.file.name}" to ${nextFile.targetName}...`);
 
       try {
-        await sendFile({
+        // Use sendFileChunksOnly since metadata was already sent in batch
+        await sendFileChunksOnly({
           file: nextFile.file,
+          metadata: nextFile.metadata,
           targetId: nextFile.targetId,
           peers: peersRef.current,
           onProgress: ({ sentBytes, totalBytes }) => {
@@ -371,27 +516,23 @@ function App() {
 
   return (
     <>
-      {incomingFileRequest && (
-        <FileTransferToast
-          fileName={incomingFileRequest.fileName}
-          fileSize={incomingFileRequest.fileSize}
-          totalChunks={incomingFileRequest.totalChunks}
-          onAccept={handleAcceptFile}
-          onReject={handleRejectFile}
+      {pendingIncomingFiles.length > 0 && (
+        <IncomingFilesDialog
+          files={pendingIncomingFiles}
+          onAccept={handleAcceptFiles}
+          onReject={handleRejectFiles}
         />
       )}
-
-      {receivingFileProgress && (
-        <FileTransferProgress
-          fileName={receivingFileProgress.fileName}
-          progress={receivingFileProgress.progress}
-          receivedBytes={receivingFileProgress.receivedBytes}
-          totalBytes={receivingFileProgress.totalBytes}
-          receivedChunks={receivingFileProgress.receivedChunks}
-          totalChunks={receivingFileProgress.totalChunks}
-        />
+      
+      {/* Debug: Show pending files count */}
+      {process.env.NODE_ENV === 'development' && (
+        <div style={{ position: 'fixed', bottom: 10, right: 10, background: 'rgba(0,0,0,0.8)', color: 'white', padding: '10px', borderRadius: '5px', zIndex: 10000, fontSize: '12px' }}>
+          Pending files: {pendingIncomingFiles.length}<br/>
+          Buffer: {incomingBatchBufferRef.current.length}
+        </div>
       )}
 
+      <ReceivingProgress transfers={activeReceivingTransfers} />
       <SendingQueue queue={sendingQueue} />
 
       <header>

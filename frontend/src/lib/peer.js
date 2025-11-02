@@ -160,7 +160,12 @@ function finalizeIncomingTransfer(transferId, onFileReceived) {
 
   if (onFileReceived) {
     try {
-      onFileReceived({ name: transfer.metadata.name, blob, url });
+      onFileReceived({ 
+        name: transfer.metadata.name, 
+        blob, 
+        url,
+        transferId: transferId 
+      });
     } catch (error) {
       console.error("onFileReceived handler failed", error);
     }
@@ -232,6 +237,8 @@ function handleControlMessage(text, channel, onFileReceived, onProgress, onFileR
     return;
   }
 
+  console.log('handleControlMessage received:', message.type, 'onFileRequest provided?', !!onFileRequest);
+
   switch (message?.type) {
     case "chunk-ack":
       resolveAck(message);
@@ -243,11 +250,25 @@ function handleControlMessage(text, channel, onFileReceived, onProgress, onFileR
       console.log(`Transfer ${message.transferId} complete`);
       break;
     case "file-metadata":
+      console.log('Received file-metadata for:', message.metadata?.name);
       prepareIncomingTransfer(message.metadata, channel, onFileReceived, onProgress, onFileRequest);
+      break;
+    case "batch-file-metadata":
+      console.log('Received batch-file-metadata, files count:', message.files?.length, 'onFileRequest provided?', !!onFileRequest);
+      // Handle batch metadata - prepare all files at once
+      if (message.files && Array.isArray(message.files)) {
+        message.files.forEach(metadata => {
+          console.log('Processing file from batch:', metadata.name);
+          prepareIncomingTransfer(metadata, channel, onFileReceived, onProgress, onFileRequest);
+        });
+      }
       break;
     case "transfer-rejected":
       console.warn(`File transfer rejected: ${message.reason}`);
-      alert(`File transfer was rejected by the recipient.`);
+      // Don't show alert, let the app handle it
+      if (window.handleFileRejection) {
+        window.handleFileRejection(message.transferId);
+      }
       break;
     case "transfer-accepted":
       console.log(`File transfer accepted for ${message.transferId}`);
@@ -321,9 +342,37 @@ async function prepareIncomingTransfer(metadata, channel, onFileReceived, onProg
     };
 
     // Call the onFileRequest callback with metadata and accept/reject handlers
+    console.log('prepareIncomingTransfer: onFileRequest callback provided?', !!onFileRequest, 'for file:', metadata.name);
     if (onFileRequest) {
-      onFileRequest(metadata, handleAccept, handleReject);
+      console.log('Calling onFileRequest callback for:', metadata.name);
+      try {
+        onFileRequest(metadata, handleAccept, handleReject);
+      } catch (error) {
+        console.error('Error calling onFileRequest callback:', error);
+        // Fallback to browser confirm on error
+        const fileName = metadata.name || "Unknown file";
+        const fileSize = (metadata.size / 1024).toFixed(2);
+        const fileSizeUnit = metadata.size < 1024 * 1024 ? "KB" : "MB";
+        const displaySize = metadata.size < 1024 * 1024 
+          ? fileSize 
+          : (metadata.size / (1024 * 1024)).toFixed(2);
+
+        const userAccepted = confirm(
+          `Incoming file transfer:\n\n` +
+          `File: ${fileName}\n` +
+          `Size: ${displaySize} ${fileSizeUnit}\n` +
+          `Chunks: ${metadata.totalChunks}\n\n` +
+          `Do you want to accept this file?`
+        );
+
+        if (userAccepted) {
+          handleAccept();
+        } else {
+          handleReject();
+        }
+      }
     } else {
+      console.warn('No onFileRequest callback provided, falling back to browser confirm');
       // Fallback to browser confirm if no callback provided
       const fileName = metadata.name || "Unknown file";
       const fileSize = (metadata.size / 1024).toFixed(2);
@@ -657,6 +706,120 @@ export const sendFile = async ({ file, targetId, peers, onProgress }) => {
     chunks,
     onProgress,
   });
+
+  console.log(`File "${file.name}" sent successfully`);
+};
+
+// Send batch metadata for multiple files upfront
+export const sendBatchMetadata = async ({ files, targetId, peers }) => {
+  const peerObj = peers[targetId];
+
+  if (!peerObj) {
+    throw new Error(
+      "No peer connection found. Please connect to the device first."
+    );
+  }
+
+  const resolvedChannel =
+    peerObj.channel ??
+    (typeof peerObj.whenChannelReady?.then === "function"
+      ? await peerObj.whenChannelReady
+      : null);
+
+  if (!resolvedChannel) {
+    throw new Error(
+      "No data channel available yet. Please wait for the connection to establish."
+    );
+  }
+
+  const channel = await ensureChannelOpen(resolvedChannel);
+
+  // Build metadata for all files
+  const filesMetadata = files.map(file => buildFileMetadata(file));
+
+  // Send batch metadata message
+  channel.send(
+    JSON.stringify({
+      type: "batch-file-metadata",
+      files: filesMetadata,
+    })
+  );
+
+  console.log(`Sent metadata for ${files.length} files`);
+  
+  return filesMetadata;
+};
+
+// Send file chunks without sending metadata (metadata already sent via batch)
+export const sendFileChunksOnly = async ({ file, metadata, targetId, peers, onProgress }) => {
+  const peerObj = peers[targetId];
+
+  if (!peerObj) {
+    throw new Error(
+      "No peer connection found. Please connect to the device first."
+    );
+  }
+
+  const resolvedChannel =
+    peerObj.channel ??
+    (typeof peerObj.whenChannelReady?.then === "function"
+      ? await peerObj.whenChannelReady
+      : null);
+
+  if (!resolvedChannel) {
+    throw new Error(
+      "No data channel available yet. Please wait for the connection to establish."
+    );
+  }
+
+  const channel = await ensureChannelOpen(resolvedChannel);
+  const chunks = splitFileIntoChunks(file, CHUNK_SIZE);
+
+  // Send chunks without metadata (skip metadata sending)
+  let sentBytes = 0;
+
+  for (let index = 0; index < chunks.length; index += 1) {
+    const blob = chunks[index];
+    const arrayBuffer = await blob.arrayBuffer();
+    const frame = encodeChunkFrame(metadata.id, index, arrayBuffer);
+
+    let attempt = 0;
+    while (attempt <= RETRY_LIMIT) {
+      try {
+        channel.send(frame);
+        await waitForAck(metadata.id, index);
+        sentBytes += blob.size;
+
+        if (onProgress) {
+          onProgress({
+            direction: "outbound",
+            metadata,
+            sentBytes,
+            totalBytes: metadata.size,
+            sentChunks: index + 1,
+            totalChunks: metadata.totalChunks,
+            chunkIndex: index,
+          });
+        }
+
+        break;
+      } catch (error) {
+        attempt += 1;
+        console.warn(`Retrying chunk ${index} (attempt ${attempt})`, error);
+        if (attempt > RETRY_LIMIT) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  try {
+    channel.send(
+      JSON.stringify({ type: "transfer-complete", transferId: metadata.id })
+    );
+  } catch (error) {
+    console.warn("Failed to send transfer-complete message", error);
+  }
 
   console.log(`File "${file.name}" sent successfully`);
 };

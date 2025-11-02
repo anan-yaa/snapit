@@ -6,13 +6,22 @@ export default function IncomingFilesDialog({
   onAccept, 
   onReject 
 }) {
-  const [isVisible, setIsVisible] = useState(false);
-  const [selectedFiles, setSelectedFiles] = useState(new Set());
+  // Initialize visible state based on whether files exist
+  const [isVisible, setIsVisible] = useState(files && files.length > 0);
+  const [selectedFiles, setSelectedFiles] = useState(() => {
+    return new Set((files || []).map(f => f.id));
+  });
 
   useEffect(() => {
-    setIsVisible(true);
-    // Select all files by default
-    setSelectedFiles(new Set(files.map(f => f.id)));
+    if (files && files.length > 0) {
+      console.log('IncomingFilesDialog: Setting visible to true, files:', files.map(f => f.name));
+      setIsVisible(true);
+      // Select all files by default
+      setSelectedFiles(new Set(files.map(f => f.id)));
+    } else {
+      console.log('IncomingFilesDialog: No files, setting visible to false');
+      setIsVisible(false);
+    }
   }, [files]);
 
   const formatFileSize = (bytes) => {
@@ -46,13 +55,22 @@ export default function IncomingFilesDialog({
     setIsVisible(false);
     setTimeout(() => {
       const selectedFilesList = files.filter(f => selectedFiles.has(f.id));
+      const rejectedFilesList = files.filter(f => !selectedFiles.has(f.id));
+      
+      // Call onAccept with selected files
       onAccept(selectedFilesList);
+      
+      // Call onReject with unselected files
+      if (rejectedFilesList.length > 0) {
+        onReject(rejectedFilesList);
+      }
     }, 300);
   };
 
-  const handleReject = () => {
+  const handleRejectAll = () => {
     setIsVisible(false);
     setTimeout(() => {
+      // Reject all files
       onReject(files);
     }, 300);
   };
@@ -128,7 +146,7 @@ export default function IncomingFilesDialog({
         <div className="dialog-footer">
           <button 
             className="btn-reject" 
-            onClick={handleReject}
+            onClick={handleRejectAll}
             type="button"
           >
             <i className="bi bi-x-circle" />

@@ -1,0 +1,214 @@
+.receiving-progress {
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  width: 380px;
+  max-width: calc(100vw - 40px);
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  z-index: 1000;
+  animation: slideInLeft 0.3s ease;
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: #fff;
+}
+
+.progress-header i {
+  font-size: 20px;
+  animation: bounce 2s infinite;
+}
+
+.progress-header h4 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.transfers-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.transfer-item {
+  padding: 16px 20px;
+  border-bottom: 1px solid #f3f4f6;
+  background: #fff;
+  transition: background 0.2s ease;
+}
+
+.transfer-item:last-child {
+  border-bottom: none;
+}
+
+.transfer-item:hover {
+  background: #f9fafb;
+}
+
+.transfer-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.file-icon-small {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.file-icon-small i {
+  font-size: 18px;
+}
+
+.transfer-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.transfer-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 2px;
+}
+
+.transfer-size {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.transfer-percent {
+  flex-shrink: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #10b981;
+}
+
+.progress-bar-container {
+  width: 100%;
+  height: 8px;
+  background: #e5e7eb;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 8px;
+  position: relative;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #10b981 0%, #059669 100%);
+  border-radius: 4px;
+  transition: width 0.3s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.progress-bar-shimmer {
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.4) 50%,
+    transparent 100%
+  );
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    left: -100%;
+  }
+  100% {
+    left: 200%;
+  }
+}
+
+.transfer-chunks {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.transfer-chunks i {
+  font-size: 12px;
+}
+
+/* Scrollbar styling */
+.transfers-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.transfers-list::-webkit-scrollbar-track {
+  background: #f3f4f6;
+}
+
+.transfers-list::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+
+.transfers-list::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* Mobile responsive */
+@media (max-width: 480px) {
+  .receiving-progress {
+    bottom: 10px;
+    left: 10px;
+    right: 10px;
+    width: auto;
+    max-width: none;
+  }
+
+  .progress-header {
+    padding: 12px 16px;
+  }
+
+  .transfer-item {
+    padding: 12px 16px;
+  }
+
+  .transfer-name {
+    font-size: 13px;
+  }
+
+  .transfer-size {
+    font-size: 11px;
+  }
+}

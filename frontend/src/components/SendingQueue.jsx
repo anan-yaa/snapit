@@ -20,6 +20,8 @@ export default function SendingQueue({ queue }) {
         return 'bi-check-circle-fill';
       case 'failed':
         return 'bi-x-circle-fill';
+      case 'rejected':
+        return 'bi-dash-circle-fill';
       default:
         return 'bi-file-earmark';
     }
@@ -35,6 +37,8 @@ export default function SendingQueue({ queue }) {
         return '#10b981';
       case 'failed':
         return '#ef4444';
+      case 'rejected':
+        return '#f97316';
       default:
         return '#6b7280';
     }
@@ -107,6 +111,12 @@ export default function SendingQueue({ queue }) {
             {item.status === 'failed' && (
               <div className="item-status">
                 <span className="status-badge failed">Failed</span>
+              </div>
+            )}
+
+            {item.status === 'rejected' && (
+              <div className="item-status">
+                <span className="status-badge rejected">Rejected</span>
               </div>
             )}
           </div>

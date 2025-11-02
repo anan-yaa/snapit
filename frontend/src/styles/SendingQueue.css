@@ -76,6 +76,10 @@
   background: #fef2f2;
 }
 
+.queue-item.rejected {
+  background: #fff7ed;
+}
+
 .item-icon {
   flex-shrink: 0;
 }
@@ -154,6 +158,11 @@
 .status-badge.failed {
   background: #fee2e2;
   color: #991b1b;
+}
+
+.status-badge.rejected {
+  background: #ffedd5;
+  color: #9a3412;
 }
 
 /* Scrollbar styling */
